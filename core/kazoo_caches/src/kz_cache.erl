@@ -109,6 +109,7 @@ start_link(Name, ExpirePeriod, Props) ->
             gen_server:start_link({'local', Name}, ?MODULE, [Name, ExpirePeriod, Props], []);
         BindingProps ->
             lager:debug("started new cache process (gen_listener): ~s", [Name]),
+            lager:info("started new cache process (gen_listener): ~s", [Name]),
             Bindings = [{'conf', ['federate' | P]} || P <- maybe_add_db_binding(BindingProps)],
             gen_listener:start_link({'local', Name}
                                    ,?MODULE
@@ -577,12 +578,14 @@ handle_info(_Info, State) ->
 %%------------------------------------------------------------------------------
 -spec handle_event(kz_json:object(), state()) -> gen_listener:handle_event_return().
 handle_event(JObj, #state{tab=Tab}=State) ->
+    lager:info("Origin-Cache: ~p, ets:info: ~p",
+               [kz_json:get_atom_value(<<"Origin-Cache">>, JObj), ets:info(Tab, 'name')]),
     case (V=kapi_conf:doc_update_v(JObj))
         andalso (kz_api:node(JObj) =/= kz_term:to_binary(node())
                  orelse kz_json:get_atom_value(<<"Origin-Cache">>, JObj) =/= ets:info(Tab, 'name')
                 )
     of
-        'true' -> handle_document_change(JObj, State);
+        'true' -> lager:info("Handling document change \\o/"), handle_document_change(JObj, State);
         'false' when V -> 'ok';
         'false' -> lager:error("payload invalid for kapi_conf: ~p", [JObj])
     end,
@@ -867,8 +870,9 @@ handle_document_change(JObj, State) ->
     Id = kz_json:get_value(<<"ID">>, JObj),
 
     _Keys = handle_document_change(Db, Type, Id, State),
+    lager:info("_Keys: ~p", [_Keys]),
     _Keys =/= []
-        andalso lager:debug("removed ~p keys for ~s/~s/~s", [length(_Keys), Db, Id, Type]).
+        andalso lager:info("removed ~p keys for ~s/~s/~s", [length(_Keys), Db, Id, Type]).
 
 -spec handle_document_change(kz_term:ne_binary(), kz_term:ne_binary(), kz_term:ne_binary(), state()) ->
                                     list().
@@ -885,6 +889,7 @@ handle_document_change(Db, Type, Id
                       ) ->
     MatchSpec = match_doc_changed(Db, Type, Id),
     Objects = ets:select(PTab, MatchSpec),
+    lager:info("Objects: ~p", [Objects]),
 
     lists:foldl(fun(Obj, Removed) ->
                         erase_changed(Obj, Removed, State)

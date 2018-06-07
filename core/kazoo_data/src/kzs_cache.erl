@@ -269,46 +269,125 @@ flush_cache_docs(Db, Docs, Options) ->
 
 -spec load_test() -> 'true'.
 load_test() ->
-    load_test(1000).
+    load_test(100).
 
--spec load_test(MaxAgents::pos_integer()) -> 'true'.
+-spec load_test(pos_integer()) -> 'ok'.
 load_test(MaxAgents) when MaxAgents > 0 ->
-    DbName = 'cache_load_tests',
-    Spawns =
-        case kz_datamgr:db_create(DbName) of
-            'true' ->
-                [spawn_monitor(fun() -> load_test_agent(DbName) end)
-                 || _  <- lists:seq(1, MaxAgents)];
-            _ ->
-                lager:debug("Error trying to create *~p* db, stopping test", [DbName]),
-                []
-        end,
-    ok = wait_for(Spawns),
-    'true' = kz_datamgr:db_delete(DbName).
+    DbName = <<"cache_load_tests">>,
+    CProps = [{'origin_bindings', []}],
+    %% Start the cache process with `origin_bindings' declared so we get a
+    %% gen_listener process.
+    {'ok', CachePid} = kz_cache:start_link(binary_to_atom(DbName, utf8), CProps),
+    %% "db created"
+    'ok' = load_test_publish(CachePid, <<"db_created">>, DbName, <<"database">>, DbName),
+    %% Spawn agents to simulate load.
+    Spawns = [spawn_monitor(fun() -> load_test_agent(CachePid, DbName) end)
+              || _  <- lists:seq(1, MaxAgents)],
+    %% Wait for all the agents to finish, this way we know none of the agents got stuck
+    %% or timed out.
+    'ok' = wait_for(Spawns),
+    %% "db deleted"
+    'ok' = load_test_publish(CachePid, <<"db_deleted">>, DbName, <<"database">>, DbName),
+    'ok' = kz_cache:stop_local(CachePid).
 
--spec load_test_agent(DbName::kz_term:text()) -> {pid(), reference()}.
-load_test_agent(DbName) ->
-    %% Create the doc
-    Value = kz_binary:rand_hex(5),
-    JObj = kz_json:from_list([{<<"value">>, Value}]),
-    {ok, SavedDoc} = kz_datamgr:save_doc(DbName, JObj),
+-spec load_test_agent(pid(), kz_term:text()) -> {pid(), reference()}.
+load_test_agent(CachePid, DbName) ->
+    %% "doc created"
+    DocId = kz_binary:rand_hex(16),
+    %'ok' = load_test_publish(CachePid, <<"doc_created">>, DbName, 'undefined', DocId),
+    Payload = load_test_build_payload(<<"doc_created">>, DbName, 'undefined', DocId, <<"configuration">>),
+    %StoreProps = [{'expires', 1000}, {'origin', <<"kazoo_data_cache">>}],
+    StoreProps = [{'expires', 1000}],
+    ok = kz_cache:store_local(CachePid, DocId, Payload, StoreProps),
     %% Give some time so the doc gets cached
     ok = timer:sleep(rand:uniform(900) + 100),
-    %% Update cached doc
-    Id = kz_json:get_ne_binary_value(<<"_id">>, SavedDoc),
-    NewValue = kz_binary:rand_hex(5),
-    UpdateFun = fun(SavedJObj) -> kz_json:set_value(<<"value">>, NewValue, SavedJObj) end,
-    {ok, _UpdatedDoc} = kz_datamgr:update_cache_doc(DbName, Id, UpdateFun),
-    ok.
+    %% "doc edited"
+    'ok' = load_test_publish(CachePid, <<"doc_edited">>, DbName, 'undefined', DocId).
 
 -spec wait_for([] | [{pid(), reference()}]) -> 'ok' | 'no_return'.
 wait_for([]) ->
     ok;
 wait_for([{Pid, Ref} | Spawns]) ->
+    RemainingWorkers = length(Spawns) + 1,
+    case RemainingWorkers rem 10000 of
+        0 -> lager:info("~p workers pending to finish", [RemainingWorkers]);
+        _ -> ok
+    end,
     receive
         {'DOWN', Ref, process, Pid, normal} ->
             wait_for(Spawns)
-        after 180000 ->
-            lager:info("~p failed to return, ~p workers left.", [Pid, length(Spawns)]),
+        after 10000 ->
+            lager:error("~p failed to return, ~p workers left.", [Pid, length(Spawns)]),
             exit("Failed to return")
     end.
+
+-spec load_test_publish(pid()
+                       ,kz_term:ne_binary()
+                       ,kz_term:ne_binary()
+                       ,kz_term:ne_binary()
+                       ,kz_term:ne_binary()) -> 'ok'.
+load_test_publish(CachePid, EvName, Db, EvType, Id) ->
+    Category = <<"configuration">>,
+    RKey = binary:list_to_bin(lists:join(<<".">>, [EvName, Db, kz_term:to_binary(EvType), Id])),
+    BD = load_test_build_bd(Category, RKey),
+    PBasic = load_test_build_pbasic(),
+    Payload = load_test_build_payload(EvName, Db, EvType, Id, Category),
+    CachePid ! {BD, #amqp_msg{props=PBasic, payload=kz_json:encode(Payload)}},
+    'ok'.
+
+-spec load_test_build_bd(kz_term:ne_binary(), kz_term:ne_binary()) -> #'basic.deliver'{}.
+load_test_build_bd(Category, RKey) ->
+    #'basic.deliver'
+    {'consumer_tag' = kz_binary:rand_hex(16)
+    ,'delivery_tag' = rand:uniform(1000)
+    ,'exchange' = Category
+    ,'routing_key' = RKey
+    }.
+
+-spec load_test_build_pbasic() -> #'P_basic'{}.
+load_test_build_pbasic() ->
+    #'P_basic'
+    {content_type = <<"application/json">>
+    ,content_encoding = 'undefined'
+    ,headers = 'undefined'
+    ,delivery_mode = 'undefined'
+    ,priority = 'undefined'
+    ,correlation_id = 'undefined'
+    ,reply_to = 'undefined'
+    ,expiration = 'undefined'
+    ,message_id = 'undefined'
+    ,timestamp = kz_time:now_ms()
+    ,type = 'undefined'
+    ,user_id = 'undefined'
+    ,app_id = 'undefined'
+    ,cluster_id = 'undefined'
+    }.
+
+-spec load_test_build_payload(kz_term:ne_binary()
+                             ,kz_term:ne_binary()
+                             ,kz_term:ne_binary()
+                             ,kz_term:ne_binary()
+                             ,kz_term:ne_binary()) -> kz_json:object().
+load_test_build_payload(EvName, Db, Type, Id, Category) ->
+    Payload = [{<<"Database">>, Db}
+              ,{<<"ID">>, Id}
+              ,{<<"Server-ID">>, <<>>}
+              ,{<<"Node">>, kz_term:to_binary(node())}
+              ,{<<"Msg-ID">>, kz_binary:rand_hex(8)}
+              ,{<<"Event-Name">>, EvName}
+              ,{<<"Event-Category">>, Category}
+              ,{<<"App-Version">>, <<"1.0.0">>}
+              ,{<<"App-Name">>, <<"datamgr">>}
+              ],
+    %% Database events have less/different {key, value} pairs compared to document events.
+    FinalPayload =
+        case Type of
+            <<"database">> ->
+                [{<<"Type">>, Type} | Payload];
+            'undefined' ->
+                [{<<"Origin-Cache">>, <<"kazoo_data_cache">>}
+                ,{<<"Revision">>, kz_binary:rand_hex(16)}
+                ,{<<"Is-Soft-Deleted">>, 'false'}
+                 | Payload]
+        end,
+    kz_json:from_list(FinalPayload).

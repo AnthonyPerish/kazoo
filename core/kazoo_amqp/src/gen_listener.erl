@@ -631,10 +631,17 @@ maybe_remove_binding(_BP, _B, _P, _Q) -> 'true'.
 %% @end
 %%------------------------------------------------------------------------------
 -spec handle_info(any(), state()) -> kz_types:handle_info_ret().
-handle_info({#'basic.deliver'{}=BD, #amqp_msg{props=#'P_basic'{content_type=CT}=Basic
+handle_info({#'basic.deliver'{exchange=Exchange}=BD, #amqp_msg{props=#'P_basic'{content_type=CT}=Basic
                                              ,payload=Payload
                                              }}
            ,#state{params=Params, auto_ack=AutoAck}=State) ->
+    case Exchange /= <<"nodes">> of
+        true ->
+            Str = lists:flatten(lists:duplicate(80, "=")),
+            lager:info("~n~p~nBD: ~p~nCT: ~p~nBasic: ~p~nPayload: ~p~n~p~n", [Str, BD, CT, Basic, Payload, Str]);
+        _ ->
+            ok
+    end,
     _ = case AutoAck of
             'true' -> (catch kz_amqp_util:basic_ack(BD));
             'false' -> 'ok'
@@ -822,6 +829,7 @@ format_status(_Opt, [_PDict, #state{module=Module
 
 -spec distribute_event(kz_json:object(), deliver(), state()) -> state().
 distribute_event(JObj, Deliver, State) ->
+    %lager:info("State.handle_event_mfa: ~p", [State#state.handle_event_mfa]),
     case callback_handle_event(JObj, Deliver, State) of
         'ignore' -> State;
         {'ignore', ModuleState} -> State#state{module_state=ModuleState};
