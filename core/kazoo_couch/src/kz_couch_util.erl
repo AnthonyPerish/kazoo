@@ -293,6 +293,15 @@ format_error({'http_error', _, Msg}) -> Msg;
 format_error({'error', Error}) -> Error;
 format_error(<<"400: illegal_database_name">>) -> 'illegal_database_name';
 format_error('forbidden') -> 'forbidden';
+format_error({hackney_response, _, done}) ->
+    lager:warning("socket closed unexpectedly"),
+    'tcp_closed';
+format_error({hackney_response, _, {'error', {'closed', _Buffer}}}) ->
+    lager:warning("socket closed unexpectedly"),
+    'tcp_closed';
+format_error({hackney_response, _, {'error', closed}}) ->
+    lager:warning("socket closed unexpectedly"),
+    'tcp_closed';
 format_error(E) ->
     lager:warning("unformatted error: ~p", [E]),
     E.
